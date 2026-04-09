@@ -1,0 +1,36 @@
+# Per-city configuration for the collision underreporting pipeline.
+#
+# incident_source: how dispatch incident data is obtained for this city
+#   broadcastify  — download + transcribe scanner audio (Broadcastify archive)
+#   call_log      — scrape/parse a public web-based call log
+#   cad_api       — pull structured data from a public CAD/dispatch API
+
+el_cerrito:
+  incident_source: broadcastify
+  broadcastify_feed_id: 33365
+  switrs_jurisdiction: "El Cerrito"
+  fips: "06013"          # Contra Costa County
+  also_covers: ["Albany", "Kensington"]
+  notes: >
+    CCRFCC (Contra Costa Regional Fire Communications Center) feed.
+    Fire/EMS only — El Cerrito PD encrypted Sept 2025 (countywide Contra Costa).
+    Same feed covers Albany and Kensington Fire/EMS.
+
+berkeley:
+  incident_source: call_log
+  call_log_url: "https://www.cityofberkeley.info/police/calls"
+  call_log_delay_minutes: 10
+  switrs_jurisdiction: "Berkeley"
+  fips: "06001"          # Alameda County
+  notes: >
+    Berkeley PD encrypted Nov 2025. BPD launched a public 10-min-delay police
+    call log — structured enough to parse without audio transcription.
+
+san_francisco:
+  incident_source: cad_api
+  datasf_cad_api: "https://data.sfgov.org/resource/gnap-fj3t.json"
+  switrs_jurisdiction: "San Francisco"
+  fips: "06075"
+  notes: >
+    SF DataSF CAD API provides real-time structured dispatch data — no audio
+    needed. Most structured source of the three cities.

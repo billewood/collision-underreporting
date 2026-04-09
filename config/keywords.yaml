@@ -1,0 +1,45 @@
+# Keywords used to pre-filter transcripts before the Claude extraction pass.
+# These are case-insensitive regex patterns.
+# A block matching ANY pattern in 'collision' gets sent to Claude Haiku.
+# Patterns in 'exclude' suppress false positives (e.g., "TC" as call sign).
+
+collision:
+  # Standard dispatch terminology
+  - "tc\\b"             # traffic collision (most common abbreviation)
+  - "traffic collision"
+  - "traffic accident"
+  - "mva\\b"            # motor vehicle accident
+  - "hit and run"
+  - "hitter"            # dispatch slang for hit-and-run driver
+  - "vehicle vs"
+  - "vehicle accident"
+
+  # Pedestrian
+  - "pedestrian"
+  - "\\bped\\b"         # "ped" alone — careful, also used in "pediatric"
+  - "ped down"
+  - "ped struck"
+  - "person struck"
+  - "person down.*vehicle"
+  - "subject struck"
+
+  # Bicycle / cyclist
+  - "bicycle"
+  - "cyclist"
+  - "bike rider"
+  - "bicyclist"
+  - "\\bbike\\b.*struck"
+  - "\\bbike\\b.*collision"
+  - "vehicle vs.*bike"
+  - "vehicle vs.*bicycle"
+
+  # Injury qualifiers that increase relevance alongside other terms
+  - "injuries.*road"
+  - "injuries.*street"
+  - "injuries.*avenue"
+  - "injuries.*blvd"
+
+exclude:
+  # Suppress common false positives
+  - "pediatric"         # "ped" in pediatric context
+  - "pedal"             # bicycle pedal, not a ped victim
