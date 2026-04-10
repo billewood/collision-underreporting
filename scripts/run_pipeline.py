@@ -21,6 +21,9 @@ Usage examples:
     --steps analyze --chart
 """
 
+import platform
+import shutil
+import subprocess
 import sys
 from datetime import date, timedelta
 from pathlib import Path
@@ -28,6 +31,38 @@ from pathlib import Path
 import click
 
 VALID_STEPS = {"download", "transcribe", "extract", "analyze"}
+
+
+def _hardware_summary() -> str:
+    """One-line hardware summary shown at pipeline startup."""
+    system = platform.system()
+    machine = platform.machine()
+
+    def run(cmd):
+        try:
+            return subprocess.run(cmd, capture_output=True, text=True, timeout=3).stdout.strip()
+        except Exception:
+            return ""
+
+    if system == "Darwin" and machine == "arm64":
+        chip = run(["sysctl", "-n", "machdep.cpu.brand_string"]) or "Apple Silicon"
+        mem_bytes = int(run(["sysctl", "-n", "hw.memsize"]) or 0)
+        mem = f"{mem_bytes / 1024**3:.0f} GB" if mem_bytes else "?"
+        return f"{chip}  |  {mem} unified memory  |  recommend: --model large-v3 --device cpu"
+
+    if shutil.which("nvidia-smi"):
+        gpu = run(["nvidia-smi", "--query-gpu=name,memory.total",
+                   "--format=csv,noheader"]).split("\n")[0]
+        try:
+            import torch
+            cuda = "CUDA available" if torch.cuda.is_available() else "CUDA unavailable"
+        except ImportError:
+            cuda = "torch not installed"
+        return f"{gpu}  |  {cuda}  |  recommend: --model medium.en --device cuda"
+
+    cpu = run(["bash", "-c",
+               "grep 'model name' /proc/cpuinfo | head -1 | cut -d: -f2"]).strip()
+    return f"{cpu or platform.processor() or 'CPU'}  |  no GPU detected  |  recommend: --model small.en --device cpu"
 
 
 def _date_range(start: date, end: date):
@@ -77,8 +112,9 @@ def main(
         sys.exit(1)
 
     days = (end - start).days + 1
-    click.echo(f"Pipeline: {city} | {start} → {end} ({days} days) | steps: {step_list}")
-    click.echo(f"Data dir: {data.resolve()}\n")
+    click.echo(f"Hardware:  {_hardware_summary()}")
+    click.echo(f"Pipeline:  {city} | {start} → {end} ({days} days) | steps: {step_list}")
+    click.echo(f"Data dir:  {data.resolve()}\n")
 
     # ── Download ─────────────────────────────────────────────────────────────
     if "download" in step_list:

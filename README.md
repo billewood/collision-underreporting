@@ -67,50 +67,178 @@ Berkeley (`call_log.py`) and SF (`cad_api.py`) ingestion modules are not yet bui
 
 ## Setup
 
-**Requirements:**
+### Prerequisites
+
 - Python 3.11+
+- [ffmpeg](https://ffmpeg.org) — required for MP3 decoding (`pydub` dependency)
+  - macOS: `brew install ffmpeg`
+  - Ubuntu/Debian: `sudo apt install ffmpeg`
 - [Broadcastify Premium](https://www.broadcastify.com) (~$30/yr) — required for archive downloads
 - Anthropic API key — used for incident extraction (~$1–5/year with keyword pre-filtering)
+
+### 1. Create a Python environment
+
+**conda (recommended):**
+```bash
+conda create -n collision-underreporting python=3.11
+conda activate collision-underreporting
+```
+
+**venv:**
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate        # macOS/Linux
+.venv\Scripts\activate           # Windows
+```
+
+### 2. Install dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Create a `.env` file:
+### 3. Set up credentials
+
+Run the interactive wizard — it prompts for each credential and writes `.env`:
+```bash
+python scripts/setup_credentials.py
+```
+
+Or create `.env` manually:
 ```
 BROADCASTIFY_USERNAME=your@email.com
 BROADCASTIFY_PASSWORD=yourpassword
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
+### 4. Verify your setup
+
+```bash
+python scripts/check_env.py
+```
+
+This checks your Python version, environment manager, hardware (GPU/VRAM, RAM, Apple Silicon), system dependencies (ffmpeg), installed packages, and credentials. It also recommends the right `--model` and `--device` flags for your machine.
+
+Example output:
+```
+── Hardware ─────────────────────────────────────────
+  OK     Platform                 macOS 15.3 (arm64)
+  OK     CPU/SoC                  Apple M3 Pro
+  OK     RAM                      36.0 GB (unified memory)
+  OK     Whisper rec.             --model large-v3 --device cpu
+
+── Hardware ──────────── (Linux/NVIDIA example) ────
+  OK     GPU                      NVIDIA GeForce GTX 970  (3.9 GB VRAM)
+  OK     PyTorch CUDA             available (torch 2.2.0)
+  OK     Whisper rec.             --model medium.en --device cuda
+```
+
 ---
 
 ## Running the Pipeline
 
+The pipeline auto-displays your hardware summary at startup so you can confirm it's using the right device.
+
 ### El Cerrito / Albany / Kensington (Broadcastify audio)
 
+**Recommended first run — 1-week test:**
 ```bash
-# Full pipeline: download → transcribe → extract incidents
 python scripts/run_pipeline.py \
   --city el_cerrito \
+  --start 2025-10-01 --end 2025-10-07 \
+  --steps download,transcribe,extract
+```
+`--model` and `--device` are auto-detected. Override if needed:
+```bash
+# GTX 970 (Linux)
+python scripts/run_pipeline.py --city el_cerrito \
   --start 2025-10-01 --end 2025-10-07 \
   --steps download,transcribe,extract \
   --model medium.en --device cuda
 
-# Analysis (after also downloading SWITRS data — see below)
-python scripts/run_pipeline.py \
-  --city el_cerrito \
-  --start 2025-10-01 --end 2025-10-31 \
-  --steps analyze --chart
+# M3 Pro (Mac)
+python scripts/run_pipeline.py --city el_cerrito \
+  --start 2025-10-01 --end 2025-10-07 \
+  --steps download,transcribe,extract \
+  --model large-v3
 ```
 
-**Hardware:** GTX 970 (4GB) → `--model medium.en --device cuda` (~45 sec/block). M3 Pro → `--model large-v3` (~30 sec/block).
+**Run individual steps:**
+```bash
+# Download only
+python scripts/run_pipeline.py --city el_cerrito \
+  --start 2025-10-01 --end 2025-10-07 --steps download
+
+# Transcribe previously downloaded audio
+python scripts/run_pipeline.py --city el_cerrito \
+  --start 2025-10-01 --end 2025-10-07 --steps transcribe
+
+# Extract incidents from existing transcripts
+python scripts/run_pipeline.py --city el_cerrito \
+  --start 2025-10-01 --end 2025-10-07 --steps extract
+
+# Re-authenticate (if Broadcastify session expired)
+python scripts/run_pipeline.py --city el_cerrito \
+  --start 2025-10-01 --end 2025-10-07 --steps download --relogin
+```
+
+**Re-process existing files:**
+```bash
+python scripts/run_pipeline.py --city el_cerrito \
+  --start 2025-10-01 --end 2025-10-07 \
+  --steps transcribe,extract --overwrite
+```
+
+**Disable audio preprocessing** (to compare raw vs. filtered transcription quality):
+```bash
+python scripts/run_pipeline.py --city el_cerrito \
+  --start 2025-10-01 --end 2025-10-07 \
+  --steps transcribe --no-preprocess
+```
 
 ### SWITRS data
 
-Export from [tims.berkeley.edu](https://tims.berkeley.edu) → Data → Collisions. Filter by jurisdiction, date range. Save CSV to `data/switrs/{city}/`.
+SWITRS has no public API — export manually from [tims.berkeley.edu](https://tims.berkeley.edu):
+1. Go to **Data → Collisions**
+2. Filter by jurisdiction (e.g. "El Cerrito"), date range, and collision type
+3. Export as CSV
+4. Save to `data/switrs/el_cerrito/`
 
-SWITRS lags 6–18 months, so use date ranges from at least a year ago for comparison.
+> SWITRS lags 6–18 months, so use date ranges from at least a year ago for meaningful comparison.
+
+### Analysis
+
+```bash
+# Print gap ratio table
+python scripts/run_pipeline.py \
+  --city el_cerrito \
+  --start 2025-01-01 --end 2025-06-30 \
+  --steps analyze
+
+# Print table + save time-series chart to data/analysis/el_cerrito_gap.png
+python scripts/run_pipeline.py \
+  --city el_cerrito \
+  --start 2025-01-01 --end 2025-06-30 \
+  --steps analyze --chart
+```
+
+### All options
+
+```
+--city            City key from config/cities.yaml (required)
+--start           Start date YYYY-MM-DD (required)
+--end             End date YYYY-MM-DD inclusive (required)
+--steps           Comma-separated: download,transcribe,extract,analyze
+--model           Whisper model: tiny.en / small.en / medium.en / large-v3
+--device          cuda / cpu (auto-detected if omitted)
+--jobs            Parallel download threads (default: 4)
+--relogin         Force Broadcastify re-authentication
+--overwrite       Re-process files that already exist
+--no-preprocess   Skip bandpass filter and alert tone trimming
+--min-confidence  Minimum incident confidence score for analysis (default: 0.5)
+--chart           Save comparison chart (analyze step only)
+--data-dir        Root data directory (default: data/)
+```
 
 ---
 
