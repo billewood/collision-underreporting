@@ -1,8 +1,84 @@
-# Keywords used to pre-filter transcripts before the Claude extraction pass.
-# These are case-insensitive regex patterns.
-# A block matching ANY pattern in 'collision' gets sent to Claude Haiku.
-# Patterns in 'exclude' suppress false positives (e.g., "TC" as call sign).
+# Keywords used to classify and filter transcripts.
+# All patterns are case-insensitive regex.
+#
+# 'collision' blocks get sent to Claude Haiku for structured extraction.
+# 'call_types' are used to categorize ALL blocks (cheap regex, no LLM).
+#   Every block gets tagged with its best-matching call_type and saved
+#   to data/incidents/{city}/{YYYYMMDD}_call_log.jsonl.
+# 'exclude' patterns suppress false positives in the collision filter.
 
+# ── Call type classification (applied to every block) ──────────────────────
+# Checked in order — first match wins. 'other' is the fallback.
+call_types:
+  medical:
+    - "medical"
+    - "\\bems\\b"
+    - "chest pain"
+    - "\\bafa\\b"          # automatic fire alarm (medical context)
+    - "unconscious"
+    - "not breathing"
+    - "difficulty breathing"
+    - "shortness of breath"
+    - "seizure"
+    - "stroke"
+    - "\\b9-1-1\\b.*medical"
+    - "\\bals\\b"          # advanced life support
+    - "\\bbls\\b"          # basic life support
+    - "respond.*medical"
+    - "fall victim"
+    - "person down"
+    - "subject down"
+    - "\\boverdo"          # overdose
+    - "cardiac"
+    - "diabetic"
+
+  fire:
+    - "structure fire"
+    - "working fire"
+    - "\\bfire\\b"
+    - "smoke showing"
+    - "smoke in the area"
+    - "brush fire"
+    - "vegetation fire"
+    - "car fire"
+    - "vehicle fire"
+    - "alarm.*fire"
+    - "fire.*alarm"
+
+  vehicle_collision:
+    - "tc\\b"
+    - "traffic collision"
+    - "traffic accident"
+    - "mva\\b"
+    - "vehicle accident"
+    - "solo vehicle"
+    - "vehicle vs"
+    - "hit and run"
+    - "hitter"
+
+  mental_health:
+    - "\\b5150\\b"         # CA involuntary psychiatric hold
+    - "\\b5152\\b"
+    - "psychiatric"
+    - "mental health"
+    - "welfare check"
+    - "suicidal"
+    - "\\b417\\b"          # person with weapon (often overlaps)
+
+  hazmat:
+    - "hazmat"
+    - "gas leak"
+    - "fuel spill"
+    - "chemical"
+    - "carbon monoxide"
+    - "\\bco\\b.*detector"
+
+  water_rescue:
+    - "water rescue"
+    - "swift water"
+    - "drowning"
+
+# ── Collision filter (these blocks go to Claude Haiku) ─────────────────────
 collision:
   # Standard dispatch terminology
   - "tc\\b"             # traffic collision (most common abbreviation)

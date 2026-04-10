@@ -144,12 +144,40 @@ def main(
     # ── Extract ──────────────────────────────────────────────────────────────
     if "extract" in step_list:
         click.echo("── Step 3: Extract incidents ────────────────────────────────")
+        from collections import Counter
         from broadcastify.extract import extract_date
-        total = 0
+        all_incidents = []
+        all_call_log = []
         for dt in _date_range(start, end):
-            incidents = extract_date(city, dt, data_dir=data, overwrite=overwrite)
-            total += len(incidents)
-        click.echo(f"  Extracted {total} incidents total\n")
+            incidents, call_log = extract_date(city, dt, data_dir=data, overwrite=overwrite)
+            all_incidents.extend(incidents)
+            all_call_log.extend(call_log)
+
+        # Cumulative summary across the full date range
+        if all_call_log:
+            total_blocks = len(all_call_log)
+            flagged = sum(1 for r in all_call_log if r["collision_flagged"])
+            type_counts = Counter(r["call_type"] for r in all_call_log)
+            bike = sum(1 for i in all_incidents if i.get("involves_bicycle"))
+            ped = sum(1 for i in all_incidents if i.get("involves_pedestrian"))
+            veh = sum(
+                1 for i in all_incidents
+                if not i.get("involves_bicycle") and not i.get("involves_pedestrian")
+                and i.get("incident_type") != "parse_error"
+            )
+            click.echo(f"\n── Extract summary: {city} {start} → {end} {'─' * 20}")
+            click.echo(f"  Blocks processed:         {total_blocks}")
+            click.echo(f"  Call type breakdown:")
+            for call_type, count in sorted(type_counts.items(), key=lambda x: -x[1]):
+                pct = count / total_blocks * 100
+                click.echo(f"    {call_type:<22} {count:>4}  ({pct:.0f}%)")
+            click.echo(f"  Collision-flagged:         {flagged}/{total_blocks}")
+            click.echo(f"  Incidents extracted:       {len(all_incidents)}")
+            if all_incidents:
+                click.echo(f"    bicycle:               {bike}")
+                click.echo(f"    pedestrian:            {ped}")
+                click.echo(f"    vehicle only:          {veh}")
+        click.echo()
 
     # ── Analyze ──────────────────────────────────────────────────────────────
     if "analyze" in step_list:

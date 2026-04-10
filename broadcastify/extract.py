@@ -2,15 +2,16 @@
 Extract collision incidents from transcripts.
 
 Two-step pipeline:
-  1. Keyword filter (free, regex) — flags ~5-10% of blocks as potentially relevant
-  2. Claude Haiku structured extraction — only on flagged blocks
+  1. Categorize every block by call type (free, regex) — saved to call_log.jsonl
+  2. Claude Haiku structured extraction — only on collision-flagged blocks
 
-The LLM step corrects dispatch jargon transcription errors (TC, MVA, ped, hitter)
-and extracts structured incident records. This is what turns messy scanner text
-into data comparable against SWITRS.
+The call log preserves a record of every processed block (medical, fire, vehicle
+collision, mental health, etc.) for context and longitudinal analysis. The
+collision-specific incidents get their own incidents JSONL for SWITRS comparison.
 
-Block boundary handling: when processing block N, the last 30 seconds of block N-1
-are prepended as context, since a dispatch call can straddle the 30-minute boundary.
+Output files per date:
+  data/incidents/{city}/{YYYYMMDD}.jsonl       — collision incidents (Claude-extracted)
+  data/incidents/{city}/{YYYYMMDD}_call_log.jsonl — all blocks, categorized
 
 Usage:
     python -m broadcastify.extract --city el_cerrito --date 2025-10-01
@@ -18,9 +19,9 @@ Usage:
 
 import json
 import re
+from collections import Counter
 from datetime import date
 from pathlib import Path
-from typing import Any
 
 import anthropic
 import click
@@ -61,12 +62,26 @@ Output ONLY a JSON array of incident objects with these fields:
 """
 
 
-def _load_keywords() -> tuple[list[re.Pattern], list[re.Pattern]]:
-    """Load collision and exclude keyword patterns."""
+def _load_keywords() -> tuple[dict[str, list[re.Pattern]], list[re.Pattern], list[re.Pattern]]:
+    """Load call_type categories, collision patterns, and exclude patterns."""
     data = yaml.safe_load(KEYWORDS_FILE.read_text())
+
+    call_type_patterns: dict[str, list[re.Pattern]] = {}
+    for category, patterns in data.get("call_types", {}).items():
+        call_type_patterns[category] = [re.compile(p, re.IGNORECASE) for p in patterns]
+
     collision = [re.compile(p, re.IGNORECASE) for p in data.get("collision", [])]
     exclude = [re.compile(p, re.IGNORECASE) for p in data.get("exclude", [])]
-    return collision, exclude
+    return call_type_patterns, collision, exclude
+
+
+def classify_call_type(text: str, call_type_patterns: dict[str, list[re.Pattern]]) -> str:
+    """Return the first matching call type category, or 'other'."""
+    for category, patterns in call_type_patterns.items():
+        for p in patterns:
+            if p.search(text):
+                return category
+    return "other"
 
 
 def keyword_matches(text: str, collision_patterns, exclude_patterns) -> bool:
@@ -107,17 +122,11 @@ def _extract_with_claude(
         model="claude-haiku-4-5-20251001",
         max_tokens=1024,
         system=SYSTEM_PROMPT,
-        messages=[
-            {
-                "role": "user",
-                "content": f"Transcript:\n{transcript_text}",
-            }
-        ],
+        messages=[{"role": "user", "content": f"Transcript:\n{transcript_text}"}],
     )
 
     raw = response.content[0].text.strip()
 
-    # Strip markdown code fences if present
     if raw.startswith("```"):
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)
@@ -127,7 +136,6 @@ def _extract_with_claude(
         if not isinstance(incidents, list):
             incidents = [incidents]
     except json.JSONDecodeError:
-        # Extraction failed — save raw for debugging
         return [
             {
                 "incident_type": "parse_error",
@@ -145,72 +153,122 @@ def _extract_with_claude(
     return incidents
 
 
+def _print_day_summary(
+    dt: date,
+    city: str,
+    call_log: list[dict],
+    incidents: list[dict],
+) -> None:
+    total = len(call_log)
+    if total == 0:
+        return
+
+    counts = Counter(r["call_type"] for r in call_log)
+    flagged = sum(1 for r in call_log if r["collision_flagged"])
+
+    bike = sum(1 for i in incidents if i.get("involves_bicycle"))
+    ped = sum(1 for i in incidents if i.get("involves_pedestrian"))
+    veh_only = sum(
+        1 for i in incidents
+        if not i.get("involves_bicycle") and not i.get("involves_pedestrian")
+        and i.get("incident_type") != "parse_error"
+    )
+
+    click.echo(f"\n  ── {city} {dt} ({'─' * 30}")
+    click.echo(f"  {'Blocks processed:':<26} {total}")
+    click.echo(f"  {'Call type breakdown:':<26}")
+    for call_type, count in sorted(counts.items(), key=lambda x: -x[1]):
+        pct = count / total * 100
+        click.echo(f"    {call_type:<22} {count:>3}  ({pct:.0f}%)")
+    click.echo(f"  {'Collision-flagged:':<26} {flagged}/{total}")
+    click.echo(f"  {'Incidents extracted:':<26} {len(incidents)}")
+    if incidents:
+        click.echo(f"    {'bicycle:':<22} {bike}")
+        click.echo(f"    {'pedestrian:':<22} {ped}")
+        click.echo(f"    {'vehicle only:':<22} {veh_only}")
+
+
 def extract_date(
     city: str,
     dt: date,
     data_dir: Path = Path("data"),
     overwrite: bool = False,
-) -> list[dict]:
+) -> tuple[list[dict], list[dict]]:
     """
-    Run extraction on all transcripts for a city on a given date.
-    Returns list of incident records.
+    Categorize all transcripts and extract collision incidents for a city on a date.
+    Returns (incidents, call_log).
     """
     transcript_dir = data_dir / "transcripts" / city / dt.strftime("%Y%m%d")
     if not transcript_dir.exists():
         click.echo(f"No transcripts at {transcript_dir}")
-        return []
+        return [], []
 
     out_dir = data_dir / "incidents" / city
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{dt.strftime('%Y%m%d')}.jsonl"
+    incidents_path = out_dir / f"{dt.strftime('%Y%m%d')}.jsonl"
+    call_log_path = out_dir / f"{dt.strftime('%Y%m%d')}_call_log.jsonl"
 
-    if out_path.exists() and not overwrite:
-        # Load existing
-        return [json.loads(line) for line in out_path.read_text().splitlines() if line]
+    if incidents_path.exists() and call_log_path.exists() and not overwrite:
+        incidents = [json.loads(l) for l in incidents_path.read_text().splitlines() if l]
+        call_log = [json.loads(l) for l in call_log_path.read_text().splitlines() if l]
+        return incidents, call_log
 
-    collision_patterns, exclude_patterns = _load_keywords()
+    call_type_patterns, collision_patterns, exclude_patterns = _load_keywords()
     client = anthropic.Anthropic()
 
     transcript_files = sorted(transcript_dir.glob("*.json"))
     if not transcript_files:
-        return []
+        return [], []
 
     all_incidents: list[dict] = []
+    call_log: list[dict] = []
     prev_transcript: dict | None = None
     flagged = 0
 
     for tf in transcript_files:
         transcript = json.loads(tf.read_text())
         text = transcript.get("text", "")
+        block_start_utc = transcript.get("block_start_utc")
 
-        if not keyword_matches(text, collision_patterns, exclude_patterns):
+        call_type = classify_call_type(text, call_type_patterns)
+        is_collision = keyword_matches(text, collision_patterns, exclude_patterns)
+
+        call_log.append({
+            "file": transcript.get("file", tf.name),
+            "block_start_utc": block_start_utc,
+            "city": city,
+            "call_type": call_type,
+            "collision_flagged": is_collision,
+            "text_preview": text[:120].strip(),
+        })
+
+        if not is_collision:
             prev_transcript = transcript
             continue
 
         flagged += 1
         click.echo(f"  [flagged] {tf.name}")
 
-        # Prepend tail of previous block for boundary context
         context = _get_context_tail(prev_transcript)
         full_text = (f"[Context from previous block:] {context}\n\n" + text) if context else text
 
-        incidents = _extract_with_claude(
-            full_text,
-            transcript.get("block_start_utc"),
-            city,
-            client,
-        )
+        incidents = _extract_with_claude(full_text, block_start_utc, city, client)
         all_incidents.extend(incidents)
         prev_transcript = transcript
 
     click.echo(f"  {flagged}/{len(transcript_files)} blocks flagged → {len(all_incidents)} incidents")
 
-    # Write JSONL output
-    with out_path.open("w") as f:
+    with incidents_path.open("w") as f:
         for inc in all_incidents:
             f.write(json.dumps(inc, ensure_ascii=False) + "\n")
 
-    return all_incidents
+    with call_log_path.open("w") as f:
+        for entry in call_log:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    _print_day_summary(dt, city, call_log, all_incidents)
+
+    return all_incidents, call_log
 
 
 @click.command()
@@ -221,7 +279,7 @@ def extract_date(
 def main(city, date_str, overwrite, data_dir):
     """Extract collision incidents from transcripts for a city and date."""
     dt = date.fromisoformat(date_str)
-    incidents = extract_date(city, dt, data_dir=Path(data_dir), overwrite=overwrite)
+    incidents, call_log = extract_date(city, dt, data_dir=Path(data_dir), overwrite=overwrite)
     click.echo(f"\nDone. {len(incidents)} incidents extracted.")
 
 
