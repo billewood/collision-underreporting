@@ -69,7 +69,7 @@ Berkeley (`call_log.py`) and SF (`cad_api.py`) ingestion modules are not yet bui
 
 ### Prerequisites
 
-- Python 3.11+
+- Python 3.10+
 - [ffmpeg](https://ffmpeg.org) — required for MP3 decoding (`pydub` dependency)
   - macOS: `brew install ffmpeg`
   - Ubuntu/Debian: `sudo apt install ffmpeg`
@@ -80,13 +80,13 @@ Berkeley (`call_log.py`) and SF (`cad_api.py`) ingestion modules are not yet bui
 
 **conda (recommended):**
 ```bash
-conda create -n collision-underreporting python=3.11
+conda create -n collision-underreporting python=3.10
 conda activate collision-underreporting
 ```
 
 **venv:**
 ```bash
-python3.11 -m venv .venv
+python3.10 -m venv .venv
 source .venv/bin/activate        # macOS/Linux
 .venv\Scripts\activate           # Windows
 ```
@@ -95,7 +95,10 @@ source .venv/bin/activate        # macOS/Linux
 
 ```bash
 pip install -r requirements.txt
+pip install -e .
 ```
+
+The second command installs the project itself in editable mode so the `broadcastify`, `switrs`, and `analysis` packages are importable when running scripts.
 
 ### 3. Set up credentials
 
