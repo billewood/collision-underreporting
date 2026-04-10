@@ -184,22 +184,43 @@ def filter_hallucinations(segments: list[dict]) -> list[dict]:
 
 def _parse_block_timestamp(filename: str) -> str | None:
     """
-    Parse UTC timestamp from Broadcastify filename.
-    Format: {YYYYMMDD}{HHMM}-{archive_id}-{feed_id}.mp3
-    e.g.  202410150021-373175-33365.mp3 → 2024-10-15T00:21:00Z
+    Parse UTC timestamp from Broadcastify archive filename.
+
+    Two formats observed in the wild:
+
+    Format A (broadcastify-cli convention):
+      {YYYYMMDDHHmm}-{archive_id}-{feed_id}.mp3
+      e.g. 202410150021-373175-5318.mp3 → 2024-10-15T00:21:00Z
+
+    Format B (what this downloader produces — archive_id is a Unix timestamp):
+      {YYYYMMDD}-{feed_id}-{unix_timestamp}-{feed_id}.mp3
+      e.g. 20251001-33365-1759360481-33365.mp3 → 2025-10-01T23:14:41Z
     """
     stem = Path(filename).stem
     parts = stem.split("-")
     if len(parts) < 3:
         return None
-    datetime_part = parts[0]  # e.g. "202410150021"
-    if len(datetime_part) != 12:
-        return None
-    try:
-        dt = datetime.strptime(datetime_part, "%Y%m%d%H%M").replace(tzinfo=timezone.utc)
-        return dt.isoformat()
-    except ValueError:
-        return None
+
+    # Format A: first part is 12 chars (YYYYMMDDHHmm)
+    if len(parts[0]) == 12:
+        try:
+            dt = datetime.strptime(parts[0], "%Y%m%d%H%M").replace(tzinfo=timezone.utc)
+            return dt.isoformat()
+        except ValueError:
+            pass
+
+    # Format B: first part is 8 chars (YYYYMMDD), third part is Unix timestamp
+    if len(parts[0]) == 8 and len(parts) >= 3:
+        try:
+            ts = int(parts[2])
+            # Sanity check: Unix timestamp should be after 2010 and before 2100
+            if 1_262_304_000 < ts < 4_102_444_800:
+                dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+                return dt.isoformat()
+        except (ValueError, OSError):
+            pass
+
+    return None
 
 
 def _get_model(model_size: str, device: str, compute_type: str):
