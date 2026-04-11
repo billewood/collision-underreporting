@@ -261,6 +261,7 @@ def transcribe_file(
     device: str | None = None,
     compute_type: str | None = None,
     preprocess: bool = True,
+    use_vad: bool = True,
 ) -> dict:
     """
     Transcribe a single MP3 block. Returns transcript dict.
@@ -270,28 +271,29 @@ def transcribe_file(
 
     model = _get_model(model_size, device, compute_type)
 
-    tone_trimmed = False
     with tempfile.TemporaryDirectory() as tmp_dir:
         if preprocess:
             input_path = preprocess_audio(audio_path, tmp_dir)
-            # Check if tone trimming happened by comparing sizes
-            tone_trimmed = input_path.exists()
         else:
             input_path = audio_path
 
-        segments_iter, info = model.transcribe(
-            str(input_path),
+        transcribe_kwargs = dict(
             beam_size=5,
             language="en",
             condition_on_previous_text=False,
-            no_speech_threshold=0.8,   # raised from 0.6 — was over-filtering scanner audio
-            vad_filter=True,
-            vad_parameters={
-                "min_silence_duration_ms": 300,  # tighter — less likely to merge speech+silence
-                "threshold": 0.3,                # lower VAD confidence threshold — catch quieter speech
-            },
+            no_speech_threshold=0.8,
             initial_prompt=EMS_PROMPT,
         )
+        if use_vad:
+            transcribe_kwargs["vad_filter"] = True
+            transcribe_kwargs["vad_parameters"] = {
+                "min_silence_duration_ms": 300,
+                "threshold": 0.3,
+            }
+        else:
+            transcribe_kwargs["vad_filter"] = False
+
+        segments_iter, info = model.transcribe(str(input_path), **transcribe_kwargs)
 
         raw_segments = [
             {
@@ -330,6 +332,7 @@ def transcribe_date(
     data_dir: Path = Path("data"),
     overwrite: bool = False,
     preprocess: bool = True,
+    use_vad: bool = True,
 ) -> list[Path]:
     """
     Transcribe all downloaded blocks for a city on a given date.
@@ -351,10 +354,15 @@ def transcribe_date(
     if device is None or compute_type is None:
         device, compute_type = _detect_device()
 
+    flags = []
+    if not preprocess:
+        flags.append("no-preprocess")
+    if not use_vad:
+        flags.append("no-vad")
     click.echo(
         f"Transcribing {len(mp3_files)} blocks | {city} {dt} | "
         f"{model_size} on {device}/{compute_type}"
-        + (" | preprocessing on" if preprocess else "")
+        + (f" | {', '.join(flags)}" if flags else "")
     )
 
     output_paths = []
@@ -365,7 +373,7 @@ def transcribe_date(
             continue
 
         click.echo(f"  [{i}/{len(mp3_files)}] {mp3.name}", nl=False)
-        result = transcribe_file(mp3, city, model_size, device, compute_type, preprocess)
+        result = transcribe_file(mp3, city, model_size, device, compute_type, preprocess, use_vad)
         filtered = result["segments_raw_count"] - len(result["segments"])
         out_path.write_text(json.dumps(result, indent=2, ensure_ascii=False))
         click.echo(
@@ -385,8 +393,10 @@ def transcribe_date(
 @click.option("--overwrite", is_flag=True, default=False)
 @click.option("--no-preprocess", "preprocess", is_flag=True, default=True,
               flag_value=False, help="Skip bandpass filter and tone trimming")
+@click.option("--no-vad", "use_vad", is_flag=True, default=True,
+              flag_value=False, help="Disable Whisper VAD filter (use if getting 0 segments)")
 @click.option("--data-dir", default="data", show_default=True)
-def main(city, date_str, model_size, device, overwrite, preprocess, data_dir):
+def main(city, date_str, model_size, device, overwrite, preprocess, use_vad, data_dir):
     """Transcribe downloaded audio blocks for a city on a given date."""
     dt = date.fromisoformat(date_str)
     paths = transcribe_date(
@@ -396,6 +406,7 @@ def main(city, date_str, model_size, device, overwrite, preprocess, data_dir):
         data_dir=Path(data_dir),
         overwrite=overwrite,
         preprocess=preprocess,
+        use_vad=use_vad,
     )
     click.echo(f"\nDone. {len(paths)} transcripts written.")
 

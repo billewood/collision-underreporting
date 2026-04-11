@@ -87,6 +87,8 @@ def _run_day(
     jobs: int,
     relogin: bool,
     overwrite: bool,
+    preprocess: bool,
+    use_vad: bool,
     data: Path,
 ) -> tuple[list, list]:
     """
@@ -132,7 +134,7 @@ def _run_day(
                 n += 1
                 continue
             click.echo(f"  transcribing {mp3_path.name}", nl=False)
-            result = transcribe_file(mp3_path, city, whisper_model, dev, compute_type)
+            result = transcribe_file(mp3_path, city, whisper_model, dev, compute_type, preprocess, use_vad)
             out_path.write_text(json.dumps(result, indent=2, ensure_ascii=False))
             click.echo(f" → {len(result['segments'])} segments")
             n += 1
@@ -150,6 +152,8 @@ def _run_day(
             device=device,
             data_dir=data,
             overwrite=overwrite,
+            preprocess=preprocess,
+            use_vad=use_vad,
         )
 
     incidents, call_log = [], []
@@ -180,6 +184,10 @@ def _run_day(
               help="Force Broadcastify re-authentication")
 @click.option("--overwrite", is_flag=True, default=False,
               help="Re-process files that already exist")
+@click.option("--no-preprocess", "preprocess", is_flag=True, default=True,
+              flag_value=False, help="Skip bandpass filter and tone trimming")
+@click.option("--no-vad", "use_vad", is_flag=True, default=True,
+              flag_value=False, help="Disable Whisper VAD filter (use if getting 0 segments)")
 @click.option("--min-confidence", default=0.5, show_default=True,
               help="Minimum confidence score for incidents (analyze step)")
 @click.option("--chart", is_flag=True, default=False,
@@ -187,7 +195,7 @@ def _run_day(
 @click.option("--data-dir", default="data", show_default=True)
 def main(
     city, start_str, end_str, steps, whisper_model, device,
-    jobs, relogin, overwrite, min_confidence, chart, data_dir,
+    jobs, relogin, overwrite, preprocess, use_vad, min_confidence, chart, data_dir,
 ):
     start = date.fromisoformat(start_str)
     end = date.fromisoformat(end_str)
@@ -218,7 +226,7 @@ def main(
             incidents, call_log = _run_day(
                 dt, city,
                 do_download, do_transcribe, do_extract,
-                whisper_model, device, jobs, relogin, overwrite, data,
+                whisper_model, device, jobs, relogin, overwrite, preprocess, use_vad, data,
             )
             all_incidents.extend(incidents)
             all_call_log.extend(call_log)
