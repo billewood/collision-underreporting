@@ -24,6 +24,12 @@ from broadcastify.auth import auth_headers, get_cookie
 ARCHIVE_LIST_URL = "https://www.broadcastify.com/archives/ajax.php"
 ARCHIVE_DOWNLOAD_URL = "https://www.broadcastify.com/archives/downloadv2"
 
+# Seconds to wait between individual block downloads (avoids 429s)
+INTER_REQUEST_DELAY = 1.5
+# Retry settings for 429 / transient errors
+MAX_RETRIES = 5
+RETRY_BACKOFF_BASE = 10  # seconds — doubles each retry (10, 20, 40, 80, 160)
+
 
 def _load_city_config(city: str) -> dict:
     cfg_path = Path("config/cities.yaml")
@@ -59,24 +65,33 @@ def _download_block(
     out_dir: Path,
     headers: dict,
 ) -> Path | None:
-    """Download a single 30-minute archive block. Returns output path or None on skip."""
+    """Download a single 30-minute archive block with retry on 429. Returns output path."""
     url_date = dt.strftime("%Y%m%d")
     url = f"{ARCHIVE_DOWNLOAD_URL}/{feed_id}/{url_date}/{archive_id}"
 
-    # Filename mirrors broadcastify-cli convention: {url_date}-{archive_id}-{feed_id}.mp3
     filename = f"{url_date}-{archive_id}-{feed_id}.mp3"
     out_path = out_dir / filename
 
     if out_path.exists():
         return out_path  # already downloaded
 
-    resp = requests.get(url, headers=headers, timeout=60, stream=True)
-    if resp.status_code == 401:
-        raise PermissionError("Auth failed — re-run with --relogin to refresh cookie.")
-    resp.raise_for_status()
+    for attempt in range(MAX_RETRIES):
+        resp = requests.get(url, headers=headers, timeout=60, stream=True)
 
-    out_path.write_bytes(resp.content)
-    return out_path
+        if resp.status_code == 401:
+            raise PermissionError("Auth failed — re-run with --relogin to refresh cookie.")
+
+        if resp.status_code == 429:
+            wait = RETRY_BACKOFF_BASE * (2 ** attempt)
+            click.echo(f"    429 rate-limited — waiting {wait}s before retry {attempt + 1}/{MAX_RETRIES}", err=True)
+            time.sleep(wait)
+            continue
+
+        resp.raise_for_status()
+        out_path.write_bytes(resp.content)
+        return out_path
+
+    raise RuntimeError(f"Failed to download {archive_id} after {MAX_RETRIES} retries (persistent 429)")
 
 
 def download_range(
@@ -108,26 +123,50 @@ def download_range(
             current += timedelta(days=1)
             continue
 
-        click.echo(f"  {current}: {len(archive_ids)} blocks")
+        already = sum(
+            1 for aid in archive_ids
+            if (date_dir / f"{current.strftime('%Y%m%d')}-{aid}-{feed_id}.mp3").exists()
+        )
+        todo = [aid for aid in archive_ids
+                if not (date_dir / f"{current.strftime('%Y%m%d')}-{aid}-{feed_id}.mp3").exists()]
+        click.echo(f"  {current}: {len(archive_ids)} blocks ({already} cached, {len(todo)} to download)")
 
-        with ThreadPoolExecutor(max_workers=jobs) as pool:
-            futures = {
-                pool.submit(
-                    _download_block, feed_id, aid, current, date_dir, headers
-                ): aid
-                for aid in archive_ids
-            }
-            for future in as_completed(futures):
-                aid = futures[future]
+        if jobs == 1:
+            # Sequential with per-request delay — safest for rate limits
+            for aid in todo:
                 try:
-                    path = future.result()
+                    path = _download_block(feed_id, aid, current, date_dir, headers)
                     if path:
                         downloaded.append(path)
                         click.echo(f"    ✓ {path.name}")
                 except Exception as exc:
                     click.echo(f"    ✗ {aid}: {exc}", err=True)
+                time.sleep(INTER_REQUEST_DELAY)
+        else:
+            with ThreadPoolExecutor(max_workers=jobs) as pool:
+                futures = {
+                    pool.submit(
+                        _download_block, feed_id, aid, current, date_dir, headers
+                    ): aid
+                    for aid in todo
+                }
+                for future in as_completed(futures):
+                    aid = futures[future]
+                    try:
+                        path = future.result()
+                        if path:
+                            downloaded.append(path)
+                            click.echo(f"    ✓ {path.name}")
+                    except Exception as exc:
+                        click.echo(f"    ✗ {aid}: {exc}", err=True)
 
-        time.sleep(0.5)  # polite pause between days
+        # Add already-cached files to the returned list
+        for aid in archive_ids:
+            p = date_dir / f"{current.strftime('%Y%m%d')}-{aid}-{feed_id}.mp3"
+            if p.exists() and p not in downloaded:
+                downloaded.append(p)
+
+        time.sleep(2)  # pause between days
         current += timedelta(days=1)
 
     return downloaded
@@ -137,7 +176,7 @@ def download_range(
 @click.option("--city", required=True, help="City key from config/cities.yaml")
 @click.option("--start", "start_str", required=True, help="Start date YYYY-MM-DD")
 @click.option("--end", "end_str", required=True, help="End date YYYY-MM-DD (inclusive)")
-@click.option("--jobs", default=4, show_default=True, help="Parallel download threads")
+@click.option("--jobs", default=1, show_default=True, help="Parallel download threads (1 = sequential, safest for rate limits)")
 @click.option("--relogin", is_flag=True, default=False, help="Force re-authentication")
 @click.option(
     "--data-dir", default="data", show_default=True, help="Root data directory"

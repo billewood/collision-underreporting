@@ -86,8 +86,8 @@ def _date_range(start: date, end: date):
               help="Whisper model (medium.en for GTX970, large-v3 for M3 Pro)")
 @click.option("--device", default=None,
               help="cuda / mps / cpu (auto-detected if omitted)")
-@click.option("--jobs", default=4, show_default=True,
-              help="Parallel download threads")
+@click.option("--jobs", default=1, show_default=True,
+              help="Parallel download threads (1 = sequential, safest for rate limits)")
 @click.option("--relogin", is_flag=True, default=False,
               help="Force Broadcastify re-authentication")
 @click.option("--overwrite", is_flag=True, default=False,
