@@ -79,10 +79,9 @@ def _date_range(start: date, end: date):
 def _run_day(
     dt: date,
     city: str,
-    step_list: list[str],
-    do_download,
-    do_transcribe,
-    do_extract,
+    do_download: bool,
+    do_transcribe: bool,
+    do_extract: bool,
     whisper_model: str,
     device: str | None,
     jobs: int,
@@ -90,17 +89,60 @@ def _run_day(
     overwrite: bool,
     data: Path,
 ) -> tuple[list, list]:
-    """Run whichever steps are active for a single day. Returns (incidents, call_log)."""
+    """
+    Run whichever steps are active for a single day. Returns (incidents, call_log).
+
+    When both download and transcribe are active, uses a producer-consumer
+    pattern: the downloader runs in a background thread and puts each completed
+    MP3 path onto a queue; the main thread transcribes each block as soon as
+    it arrives. This hides the inter-request download delay inside GPU time.
+    """
     day_str = dt.strftime("%Y-%m-%d")
     click.echo(f"\n{'═' * 54}")
     click.echo(f"  {day_str}")
     click.echo(f"{'═' * 54}")
 
-    if do_download:
+    if do_download and do_transcribe:
+        # Interleaved: transcribe each block as it downloads
+        from broadcastify.auth import auth_headers, get_cookie
+        from broadcastify.download import download_iter, _load_city_config
+        from broadcastify.transcribe import transcribe_file, _detect_device
+        import json
+
+        cfg = _load_city_config(city)
+        feed_id = cfg["broadcastify_feed_id"]
+        headers = auth_headers(get_cookie(force_login=relogin))
+
+        dev = device
+        compute_type = None
+        if dev is None:
+            dev, compute_type = _detect_device()
+
+        transcript_dir = data / "transcripts" / city / dt.strftime("%Y%m%d")
+        transcript_dir.mkdir(parents=True, exist_ok=True)
+
+        q = download_iter(city, dt, headers, feed_id, data)
+        n = 0
+        while True:
+            mp3_path = q.get()
+            if mp3_path is None:
+                break
+            out_path = transcript_dir / (mp3_path.stem + ".json")
+            if out_path.exists() and not overwrite:
+                n += 1
+                continue
+            click.echo(f"  transcribing {mp3_path.name}", nl=False)
+            result = transcribe_file(mp3_path, city, whisper_model, dev, compute_type)
+            out_path.write_text(json.dumps(result, indent=2, ensure_ascii=False))
+            click.echo(f" → {len(result['segments'])} segments")
+            n += 1
+        click.echo(f"  {n} blocks transcribed")
+
+    elif do_download:
         from broadcastify.download import download_range
         download_range(city, dt, dt, jobs=jobs, relogin=relogin, data_dir=data)
 
-    if do_transcribe:
+    elif do_transcribe:
         from broadcastify.transcribe import transcribe_date
         transcribe_date(
             city, dt,
@@ -174,7 +216,7 @@ def main(
 
         for dt in _date_range(start, end):
             incidents, call_log = _run_day(
-                dt, city, step_list,
+                dt, city,
                 do_download, do_transcribe, do_extract,
                 whisper_model, device, jobs, relogin, overwrite, data,
             )

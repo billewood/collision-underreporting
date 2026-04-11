@@ -10,6 +10,8 @@ Output:
 """
 
 import json
+import queue
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
@@ -20,6 +22,8 @@ import requests
 import yaml
 
 from broadcastify.auth import auth_headers, get_cookie
+
+_SENTINEL = None  # signals end of download stream
 
 ARCHIVE_LIST_URL = "https://www.broadcastify.com/archives/ajax.php"
 ARCHIVE_DOWNLOAD_URL = "https://www.broadcastify.com/archives/downloadv2"
@@ -92,6 +96,65 @@ def _download_block(
         return out_path
 
     raise RuntimeError(f"Failed to download {archive_id} after {MAX_RETRIES} retries (persistent 429)")
+
+
+def download_iter(
+    city: str,
+    dt: date,
+    headers: dict,
+    feed_id: int,
+    data_dir: Path,
+) -> "queue.Queue[Path | None]":
+    """
+    Download all blocks for a single day in a background thread, yielding
+    each path via a Queue as soon as it's ready. Caller reads until it
+    receives the _SENTINEL (None).
+
+    This lets the main thread start transcribing block N while block N+1
+    is still downloading, hiding the inter-request delay inside GPU time.
+    """
+    q: queue.Queue = queue.Queue()
+
+    def _worker():
+        date_dir = data_dir / "audio" / city / dt.strftime("%Y%m%d")
+        date_dir.mkdir(parents=True, exist_ok=True)
+
+        archive_ids = _list_archive_ids(feed_id, dt, headers)
+        if not archive_ids:
+            click.echo(f"  {dt}: no archives found")
+            q.put(_SENTINEL)
+            return
+
+        already = [
+            aid for aid in archive_ids
+            if (date_dir / f"{dt.strftime('%Y%m%d')}-{aid}-{feed_id}.mp3").exists()
+        ]
+        todo = [aid for aid in archive_ids if aid not in already]
+        click.echo(
+            f"  {dt}: {len(archive_ids)} blocks "
+            f"({len(already)} cached, {len(todo)} to download)"
+        )
+
+        # Cached blocks go straight into the queue so they can be transcribed
+        # immediately while new ones are fetched
+        for aid in already:
+            q.put(date_dir / f"{dt.strftime('%Y%m%d')}-{aid}-{feed_id}.mp3")
+
+        for aid in todo:
+            try:
+                path = _download_block(feed_id, aid, dt, date_dir, headers)
+                if path:
+                    click.echo(f"    ✓ {path.name}")
+                    q.put(path)
+            except Exception as exc:
+                click.echo(f"    ✗ {aid}: {exc}", err=True)
+            time.sleep(INTER_REQUEST_DELAY)
+
+        q.put(_SENTINEL)
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    return q
 
 
 def download_range(
