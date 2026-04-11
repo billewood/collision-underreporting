@@ -284,9 +284,12 @@ def transcribe_file(
             beam_size=5,
             language="en",
             condition_on_previous_text=False,
-            no_speech_threshold=0.6,
+            no_speech_threshold=0.8,   # raised from 0.6 — was over-filtering scanner audio
             vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 500},
+            vad_parameters={
+                "min_silence_duration_ms": 300,  # tighter — less likely to merge speech+silence
+                "threshold": 0.3,                # lower VAD confidence threshold — catch quieter speech
+            },
             initial_prompt=EMS_PROMPT,
         )
 

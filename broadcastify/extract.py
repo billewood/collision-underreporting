@@ -165,6 +165,8 @@ def _print_day_summary(
 
     counts = Counter(r["call_type"] for r in call_log)
     flagged = sum(1 for r in call_log if r["collision_flagged"])
+    with_speech = sum(1 for r in call_log if r.get("segment_count", 0) > 0)
+    total_segs = sum(r.get("segment_count", 0) for r in call_log)
 
     bike = sum(1 for i in incidents if i.get("involves_bicycle"))
     ped = sum(1 for i in incidents if i.get("involves_pedestrian"))
@@ -174,18 +176,22 @@ def _print_day_summary(
         and i.get("incident_type") != "parse_error"
     )
 
-    click.echo(f"\n  ── {city} {dt} ({'─' * 30}")
-    click.echo(f"  {'Blocks processed:':<26} {total}")
-    click.echo(f"  {'Call type breakdown:':<26}")
+    click.echo(f"\n  ── {city} {dt} {'─' * 30}")
+    click.echo(f"  {'Blocks processed:':<28} {total}")
+    click.echo(f"  {'Blocks with speech:':<28} {with_speech}/{total}  ({total_segs} total segments)")
+    if with_speech == 0:
+        click.echo(f"  WARNING: no speech detected — check audio or re-run with --overwrite --no-preprocess")
+        return
+    click.echo(f"  {'Call type breakdown:':<28}")
     for call_type, count in sorted(counts.items(), key=lambda x: -x[1]):
         pct = count / total * 100
-        click.echo(f"    {call_type:<22} {count:>3}  ({pct:.0f}%)")
-    click.echo(f"  {'Collision-flagged:':<26} {flagged}/{total}")
-    click.echo(f"  {'Incidents extracted:':<26} {len(incidents)}")
+        click.echo(f"    {call_type:<24} {count:>3}  ({pct:.0f}%)")
+    click.echo(f"  {'Collision-flagged:':<28} {flagged}/{total}")
+    click.echo(f"  {'Incidents extracted:':<28} {len(incidents)}")
     if incidents:
-        click.echo(f"    {'bicycle:':<22} {bike}")
-        click.echo(f"    {'pedestrian:':<22} {ped}")
-        click.echo(f"    {'vehicle only:':<22} {veh_only}")
+        click.echo(f"    {'bicycle:':<24} {bike}")
+        click.echo(f"    {'pedestrian:':<24} {ped}")
+        click.echo(f"    {'vehicle only:':<24} {veh_only}")
 
 
 def extract_date(
@@ -239,6 +245,7 @@ def extract_date(
             "city": city,
             "call_type": call_type,
             "collision_flagged": is_collision,
+            "segment_count": len(transcript.get("segments", [])),
             "text_preview": text[:120].strip(),
         })
 

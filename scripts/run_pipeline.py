@@ -226,6 +226,8 @@ def main(
         # ── Cumulative summary ────────────────────────────────────────────────
         if do_extract and all_call_log:
             total_blocks = len(all_call_log)
+            with_speech = sum(1 for r in all_call_log if r.get("segment_count", 0) > 0)
+            total_segs = sum(r.get("segment_count", 0) for r in all_call_log)
             flagged = sum(1 for r in all_call_log if r["collision_flagged"])
             type_counts = Counter(r["call_type"] for r in all_call_log)
             bike = sum(1 for i in all_incidents if i.get("involves_bicycle"))
@@ -238,17 +240,22 @@ def main(
             click.echo(f"\n{'═' * 54}")
             click.echo(f"  Summary: {city}  {start} → {end}")
             click.echo(f"{'═' * 54}")
-            click.echo(f"  Blocks processed:       {total_blocks}")
-            click.echo(f"  Call type breakdown:")
-            for call_type, count in sorted(type_counts.items(), key=lambda x: -x[1]):
-                pct = count / total_blocks * 100
-                click.echo(f"    {call_type:<22} {count:>4}  ({pct:.0f}%)")
-            click.echo(f"  Collision-flagged:       {flagged}/{total_blocks}")
-            click.echo(f"  Incidents extracted:     {len(all_incidents)}")
-            if all_incidents:
-                click.echo(f"    bicycle:             {bike}")
-                click.echo(f"    pedestrian:          {ped}")
-                click.echo(f"    vehicle only:        {veh}")
+            click.echo(f"  Blocks processed:         {total_blocks}")
+            click.echo(f"  Blocks with speech:       {with_speech}/{total_blocks}  ({total_segs} segments)")
+            if with_speech == 0:
+                click.echo(f"  WARNING: no speech detected in any block.")
+                click.echo(f"  Re-run transcribe with --overwrite --no-preprocess to diagnose.")
+            else:
+                click.echo(f"  Call type breakdown:")
+                for call_type, count in sorted(type_counts.items(), key=lambda x: -x[1]):
+                    pct = count / total_blocks * 100
+                    click.echo(f"    {call_type:<22} {count:>4}  ({pct:.0f}%)")
+                click.echo(f"  Collision-flagged:         {flagged}/{total_blocks}")
+                click.echo(f"  Incidents extracted:       {len(all_incidents)}")
+                if all_incidents:
+                    click.echo(f"    bicycle:               {bike}")
+                    click.echo(f"    pedestrian:            {ped}")
+                    click.echo(f"    vehicle only:          {veh}")
 
     # ── Analyze (runs after all days, uses saved data) ────────────────────────
     if do_analyze:
