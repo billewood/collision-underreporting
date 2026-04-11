@@ -1,13 +1,16 @@
 """
 Top-level pipeline orchestrator.
 
-Runs any combination of pipeline steps for a city and date range.
+When multiple steps are requested together, they run day-by-day in a rolling
+fashion: each day is downloaded, transcribed, and extracted before moving to
+the next. This means transcription starts on day 1 while day 2 is still
+downloading, rather than waiting for all downloads to complete first.
 
 Usage examples:
 
-  # Full pipeline, 1-week test run
+  # Full pipeline, rolling day-by-day
   python scripts/run_pipeline.py \\
-    --city el_cerrito --start 2025-10-01 --end 2025-10-07 \\
+    --city el_cerrito --start 2025-10-01 --end 2025-10-31 \\
     --steps download,transcribe,extract
 
   # Transcribe + extract only (audio already downloaded)
@@ -25,6 +28,7 @@ import platform
 import shutil
 import subprocess
 import sys
+from collections import Counter
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -72,6 +76,48 @@ def _date_range(start: date, end: date):
         current += timedelta(days=1)
 
 
+def _run_day(
+    dt: date,
+    city: str,
+    step_list: list[str],
+    do_download,
+    do_transcribe,
+    do_extract,
+    whisper_model: str,
+    device: str | None,
+    jobs: int,
+    relogin: bool,
+    overwrite: bool,
+    data: Path,
+) -> tuple[list, list]:
+    """Run whichever steps are active for a single day. Returns (incidents, call_log)."""
+    day_str = dt.strftime("%Y-%m-%d")
+    click.echo(f"\n{'═' * 54}")
+    click.echo(f"  {day_str}")
+    click.echo(f"{'═' * 54}")
+
+    if do_download:
+        from broadcastify.download import download_range
+        download_range(city, dt, dt, jobs=jobs, relogin=relogin, data_dir=data)
+
+    if do_transcribe:
+        from broadcastify.transcribe import transcribe_date
+        transcribe_date(
+            city, dt,
+            model_size=whisper_model,
+            device=device,
+            data_dir=data,
+            overwrite=overwrite,
+        )
+
+    incidents, call_log = [], []
+    if do_extract:
+        from broadcastify.extract import extract_date
+        incidents, call_log = extract_date(city, dt, data_dir=data, overwrite=overwrite)
+
+    return incidents, call_log
+
+
 @click.command()
 @click.option("--city", required=True, help="City key from config/cities.yaml")
 @click.option("--start", "start_str", required=True, help="Start date YYYY-MM-DD")
@@ -111,77 +157,62 @@ def main(
         click.echo(f"Unknown steps: {invalid}. Valid: {VALID_STEPS}", err=True)
         sys.exit(1)
 
+    do_download   = "download"   in step_list
+    do_transcribe = "transcribe" in step_list
+    do_extract    = "extract"    in step_list
+    do_analyze    = "analyze"    in step_list
+
     days = (end - start).days + 1
     click.echo(f"Hardware:  {_hardware_summary()}")
     click.echo(f"Pipeline:  {city} | {start} → {end} ({days} days) | steps: {step_list}")
-    click.echo(f"Data dir:  {data.resolve()}\n")
+    click.echo(f"Data dir:  {data.resolve()}")
 
-    # ── Download ─────────────────────────────────────────────────────────────
-    if "download" in step_list:
-        click.echo("── Step 1: Download ─────────────────────────────────────────")
-        from broadcastify.download import download_range
-        paths = download_range(
-            city, start, end, jobs=jobs, relogin=relogin, data_dir=data
-        )
-        click.echo(f"  Downloaded {len(paths)} blocks\n")
+    # ── Rolling day-by-day loop (download → transcribe → extract per day) ─────
+    if do_download or do_transcribe or do_extract:
+        all_incidents: list[dict] = []
+        all_call_log: list[dict] = []
 
-    # ── Transcribe ───────────────────────────────────────────────────────────
-    if "transcribe" in step_list:
-        click.echo("── Step 2: Transcribe ───────────────────────────────────────")
-        from broadcastify.transcribe import transcribe_date
-        total = 0
         for dt in _date_range(start, end):
-            paths = transcribe_date(
-                city, dt,
-                model_size=whisper_model,
-                device=device,
-                data_dir=data,
-                overwrite=overwrite,
+            incidents, call_log = _run_day(
+                dt, city, step_list,
+                do_download, do_transcribe, do_extract,
+                whisper_model, device, jobs, relogin, overwrite, data,
             )
-            total += len(paths)
-        click.echo(f"  Transcribed {total} blocks\n")
-
-    # ── Extract ──────────────────────────────────────────────────────────────
-    if "extract" in step_list:
-        click.echo("── Step 3: Extract incidents ────────────────────────────────")
-        from collections import Counter
-        from broadcastify.extract import extract_date
-        all_incidents = []
-        all_call_log = []
-        for dt in _date_range(start, end):
-            incidents, call_log = extract_date(city, dt, data_dir=data, overwrite=overwrite)
             all_incidents.extend(incidents)
             all_call_log.extend(call_log)
 
-        # Cumulative summary across the full date range
-        if all_call_log:
+        # ── Cumulative summary ────────────────────────────────────────────────
+        if do_extract and all_call_log:
             total_blocks = len(all_call_log)
             flagged = sum(1 for r in all_call_log if r["collision_flagged"])
             type_counts = Counter(r["call_type"] for r in all_call_log)
             bike = sum(1 for i in all_incidents if i.get("involves_bicycle"))
-            ped = sum(1 for i in all_incidents if i.get("involves_pedestrian"))
-            veh = sum(
+            ped  = sum(1 for i in all_incidents if i.get("involves_pedestrian"))
+            veh  = sum(
                 1 for i in all_incidents
                 if not i.get("involves_bicycle") and not i.get("involves_pedestrian")
                 and i.get("incident_type") != "parse_error"
             )
-            click.echo(f"\n── Extract summary: {city} {start} → {end} {'─' * 20}")
-            click.echo(f"  Blocks processed:         {total_blocks}")
+            click.echo(f"\n{'═' * 54}")
+            click.echo(f"  Summary: {city}  {start} → {end}")
+            click.echo(f"{'═' * 54}")
+            click.echo(f"  Blocks processed:       {total_blocks}")
             click.echo(f"  Call type breakdown:")
             for call_type, count in sorted(type_counts.items(), key=lambda x: -x[1]):
                 pct = count / total_blocks * 100
                 click.echo(f"    {call_type:<22} {count:>4}  ({pct:.0f}%)")
-            click.echo(f"  Collision-flagged:         {flagged}/{total_blocks}")
-            click.echo(f"  Incidents extracted:       {len(all_incidents)}")
+            click.echo(f"  Collision-flagged:       {flagged}/{total_blocks}")
+            click.echo(f"  Incidents extracted:     {len(all_incidents)}")
             if all_incidents:
-                click.echo(f"    bicycle:               {bike}")
-                click.echo(f"    pedestrian:            {ped}")
-                click.echo(f"    vehicle only:          {veh}")
-        click.echo()
+                click.echo(f"    bicycle:             {bike}")
+                click.echo(f"    pedestrian:          {ped}")
+                click.echo(f"    vehicle only:        {veh}")
 
-    # ── Analyze ──────────────────────────────────────────────────────────────
-    if "analyze" in step_list:
-        click.echo("── Step 4: Analyze ──────────────────────────────────────────")
+    # ── Analyze (runs after all days, uses saved data) ────────────────────────
+    if do_analyze:
+        click.echo(f"\n{'═' * 54}")
+        click.echo(f"  Analyze")
+        click.echo(f"{'═' * 54}")
         from analysis.compare import (
             build_comparison_table,
             load_dispatch_incidents,
@@ -190,16 +221,15 @@ def main(
             print_summary,
         )
         dispatch_df = load_dispatch_incidents(city, start, end, data, min_confidence)
-        switrs_df = load_switrs_incidents(city, start, end, data)
-        table = build_comparison_table(dispatch_df, switrs_df)
+        switrs_df   = load_switrs_incidents(city, start, end, data)
+        table       = build_comparison_table(dispatch_df, switrs_df)
         print_summary(table, city)
         if chart:
-            from pathlib import Path as P
             out = data / "analysis" / f"{city}_gap.png"
             out.parent.mkdir(parents=True, exist_ok=True)
             plot_comparison(table, city, out)
 
-    click.echo("Pipeline complete.")
+    click.echo("\nPipeline complete.")
 
 
 if __name__ == "__main__":
