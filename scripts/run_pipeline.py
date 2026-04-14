@@ -29,12 +29,67 @@ import shutil
 import subprocess
 import sys
 from collections import Counter
+from contextlib import contextmanager
 from datetime import date, timedelta
 from pathlib import Path
 
 import click
 
 VALID_STEPS = {"download", "transcribe", "extract", "analyze"}
+
+
+def _run_silent(cmd: list[str]) -> bool:
+    """Run a command, return True on success."""
+    try:
+        return subprocess.run(cmd, capture_output=True, timeout=5).returncode == 0
+    except Exception:
+        return False
+
+
+@contextmanager
+def _no_sleep():
+    """
+    Prevent the OS from sleeping during a long pipeline run.
+    Restores original settings on exit (even if the pipeline errors or is interrupted).
+
+    Supports:
+      - Linux systemd: masks sleep/suspend/hibernate targets
+      - GNOME: disables AC idle sleep + screen blank via gsettings
+    """
+    sleep_targets = [
+        "sleep.target", "suspend.target", "hibernate.target", "hybrid-sleep.target"
+    ]
+
+    masked = _run_silent(
+        ["systemctl", "--user", "mask"] + sleep_targets
+    )
+    ac_sleep_disabled = _run_silent([
+        "gsettings", "set",
+        "org.gnome.settings-daemon.plugins.power", "sleep-inactive-ac-type", "nothing"
+    ])
+    idle_disabled = _run_silent([
+        "gsettings", "set", "org.gnome.desktop.session", "idle-delay", "0"
+    ])
+
+    if masked or ac_sleep_disabled:
+        click.echo("Sleep inhibited for pipeline run.")
+
+    try:
+        yield
+    finally:
+        if masked:
+            _run_silent(["systemctl", "--user", "unmask"] + sleep_targets)
+        if ac_sleep_disabled:
+            _run_silent([
+                "gsettings", "set",
+                "org.gnome.settings-daemon.plugins.power", "sleep-inactive-ac-type", "suspend"
+            ])
+        if idle_disabled:
+            _run_silent([
+                "gsettings", "set", "org.gnome.desktop.session", "idle-delay", "300"
+            ])
+        if masked or ac_sleep_disabled:
+            click.echo("Sleep settings restored.")
 
 
 def _hardware_summary() -> str:
@@ -217,6 +272,23 @@ def main(
     click.echo(f"Pipeline:  {city} | {start} → {end} ({days} days) | steps: {step_list}")
     click.echo(f"Data dir:  {data.resolve()}")
 
+    with _no_sleep():
+        _run_pipeline(
+            city, start, end, data,
+            do_download, do_transcribe, do_extract, do_analyze,
+            whisper_model, device, jobs, relogin, overwrite, preprocess, use_vad,
+            min_confidence, chart,
+        )
+
+    click.echo("\nPipeline complete.")
+
+
+def _run_pipeline(
+    city, start, end, data,
+    do_download, do_transcribe, do_extract, do_analyze,
+    whisper_model, device, jobs, relogin, overwrite, preprocess, use_vad,
+    min_confidence, chart,
+):
     # ── Rolling day-by-day loop (download → transcribe → extract per day) ─────
     if do_download or do_transcribe or do_extract:
         all_incidents: list[dict] = []
@@ -285,8 +357,6 @@ def main(
             out = data / "analysis" / f"{city}_gap.png"
             out.parent.mkdir(parents=True, exist_ok=True)
             plot_comparison(table, city, out)
-
-    click.echo("\nPipeline complete.")
 
 
 if __name__ == "__main__":

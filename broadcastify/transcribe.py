@@ -182,30 +182,32 @@ def filter_hallucinations(segments: list[dict]) -> list[dict]:
     return cleaned
 
 
-def _parse_block_timestamp(filename: str) -> str | None:
+def _parse_filename(filename: str) -> tuple[str | None, str | None]:
     """
-    Parse UTC timestamp from Broadcastify archive filename.
+    Parse UTC timestamp and feed ID from a Broadcastify archive filename.
+    Returns (block_start_utc, feed_id) — either may be None if unparseable.
 
     Two formats observed in the wild:
 
     Format A (broadcastify-cli convention):
       {YYYYMMDDHHmm}-{archive_id}-{feed_id}.mp3
-      e.g. 202410150021-373175-5318.mp3 → 2024-10-15T00:21:00Z
+      e.g. 202410150021-373175-5318.mp3 → timestamp=2024-10-15T00:21:00Z, feed=5318
 
     Format B (what this downloader produces — archive_id is a Unix timestamp):
       {YYYYMMDD}-{feed_id}-{unix_timestamp}-{feed_id}.mp3
-      e.g. 20251001-33365-1759360481-33365.mp3 → 2025-10-01T23:14:41Z
+      e.g. 20251001-33365-1759360481-33365.mp3 → timestamp=2025-10-01T23:14:41Z, feed=33365
     """
     stem = Path(filename).stem
     parts = stem.split("-")
     if len(parts) < 3:
-        return None
+        return None, None
 
     # Format A: first part is 12 chars (YYYYMMDDHHmm)
     if len(parts[0]) == 12:
         try:
             dt = datetime.strptime(parts[0], "%Y%m%d%H%M").replace(tzinfo=timezone.utc)
-            return dt.isoformat()
+            feed_id = parts[2] if len(parts) >= 3 else None
+            return dt.isoformat(), feed_id
         except ValueError:
             pass
 
@@ -216,11 +218,12 @@ def _parse_block_timestamp(filename: str) -> str | None:
             # Sanity check: Unix timestamp should be after 2010 and before 2100
             if 1_262_304_000 < ts < 4_102_444_800:
                 dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-                return dt.isoformat()
+                feed_id = parts[1]
+                return dt.isoformat(), feed_id
         except (ValueError, OSError):
             pass
 
-    return None
+    return None, None
 
 
 def _get_model(model_size: str, device: str, compute_type: str):
@@ -308,10 +311,12 @@ def transcribe_file(
     segment_list = filter_hallucinations(raw_segments)
     full_text = " ".join(s["text"] for s in segment_list)
 
+    block_start_utc, feed_id = _parse_filename(audio_path.name)
     return {
         "file": audio_path.name,
         "city": city,
-        "block_start_utc": _parse_block_timestamp(audio_path.name),
+        "feed_id": feed_id,
+        "block_start_utc": block_start_utc,
         "model": model_size,
         "device": device,
         "preprocessed": preprocess,
