@@ -18,6 +18,10 @@ import subprocess
 
 import click
 
+# Re-use the sleep inhibition context from run_pipeline
+sys.path.insert(0, str(Path(__file__).parent))
+from run_pipeline import _no_sleep
+
 BROADCASTIFY_DAILY_QUOTA = 499
 
 
@@ -31,6 +35,11 @@ BROADCASTIFY_DAILY_QUOTA = 499
 @click.option("--dry-run", is_flag=True, help="Print what would be downloaded without downloading")
 def main(city, earliest, quota, data_dir, dry_run):
     """Download missing historical dates up to the daily Broadcastify quota."""
+    with _no_sleep():
+        _run(city, earliest, quota, data_dir, dry_run)
+
+
+def _run(city, earliest, quota, data_dir, dry_run):
     audio_root = Path(data_dir) / "audio" / city
     earliest_date = date.fromisoformat(earliest)
 
