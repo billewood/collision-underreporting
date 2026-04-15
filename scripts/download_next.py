@@ -38,6 +38,7 @@ def main(city, earliest, quota, data_dir, dry_run):
         date(int(d.name[:4]), int(d.name[4:6]), int(d.name[6:8]))
         for d in audio_root.iterdir()
         if d.is_dir() and len(d.name) == 8 and d.name.isdigit()
+        and any(d.glob("*.mp3"))
     } if audio_root.exists() else set()
 
     cursor = date.today() - timedelta(days=1)
