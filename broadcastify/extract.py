@@ -54,6 +54,7 @@ Output ONLY a JSON array of incident objects with these fields:
   incident_type: "traffic_collision" | "bicycle_collision" | "pedestrian_collision" | "hit_and_run" | "other"
   involves_bicycle: true/false
   involves_pedestrian: true/false
+  jurisdiction: string (city or area name as spoken, e.g. "Richmond", "El Cerrito", "San Pablo", "Albany", "Kensington" — null if unclear)
   location: string (street, intersection, or block as spoken — correct obvious ASR errors)
   injuries_mentioned: true/false
   cut_off: true/false  (true if the transcript appears to cut off mid-dispatch)

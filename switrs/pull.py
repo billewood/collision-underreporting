@@ -72,6 +72,8 @@ def filter_bike_ped(df: pd.DataFrame) -> pd.DataFrame:
 def normalize(df: pd.DataFrame, city: str) -> pd.DataFrame:
     """
     Normalize SWITRS columns to the pipeline's shared incident schema.
+    'city' is the pipeline city key (e.g. 'el_cerrito'); the actual jurisdiction
+    is read from CITY_NAME column when available.
     """
     rows = []
     for _, row in df.iterrows():
@@ -114,9 +116,13 @@ def normalize(df: pd.DataFrame, city: str) -> pd.DataFrame:
         else:
             incident_type = "traffic_collision"
 
+        # Use CITY_NAME from SWITRS if available, fall back to pipeline city key
+        jurisdiction = str(row.get("CITY_NAME", "") or "").strip().title() or city
+
         rows.append({
             "source": "switrs",
             "city": city,
+            "jurisdiction": jurisdiction,
             "collision_date": col_date,
             "incident_type": incident_type,
             "involves_bicycle": involves_bicycle,
@@ -139,14 +145,21 @@ def load_city_switrs(
     """
     Load all SWITRS CSV files for a city, filter to bike/ped, normalize,
     and optionally filter to a date range.
+
+    CSV files should be placed in data/switrs/{city}/.
+    For cities with multiple jurisdictions (switrs_jurisdictions in cities.yaml),
+    export one CSV per jurisdiction from TIMS and drop them all in the same folder.
     """
+    cfg = _load_city_config(city)
+    jurisdictions = cfg.get("switrs_jurisdictions") or [cfg.get("switrs_jurisdiction", city)]
+
     switrs_dir = data_dir / "switrs" / city
     if not switrs_dir.exists():
         click.echo(f"No SWITRS data at {switrs_dir}")
         click.echo(
-            "Export data from tims.berkeley.edu → Data → Collisions, "
-            f"filter by jurisdiction '{_load_city_config(city)['switrs_jurisdiction']}', "
-            f"save CSV to {switrs_dir}/"
+            "Export data from tims.berkeley.edu → Data → Collisions.\n"
+            f"  Jurisdictions to export: {', '.join(jurisdictions)}\n"
+            f"  Save each CSV to {switrs_dir}/"
         )
         return pd.DataFrame()
 

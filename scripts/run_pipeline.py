@@ -140,6 +140,7 @@ def _run_day(
     whisper_model: str,
     device: str | None,
     jobs: int,
+    max_blocks: int | None,
     relogin: bool,
     overwrite: bool,
     preprocess: bool,
@@ -179,7 +180,7 @@ def _run_day(
         transcript_dir = data / "transcripts" / city / dt.strftime("%Y%m%d")
         transcript_dir.mkdir(parents=True, exist_ok=True)
 
-        q = download_iter(city, dt, headers, feed_id, data)
+        q = download_iter(city, dt, headers, feed_id, data, max_blocks=max_blocks)
         n = 0
         while True:
             mp3_path = q.get()
@@ -198,7 +199,7 @@ def _run_day(
 
     elif do_download:
         from broadcastify.download import download_range
-        download_range(city, dt, dt, jobs=jobs, relogin=relogin, data_dir=data)
+        download_range(city, dt, dt, jobs=jobs, relogin=relogin, data_dir=data, max_blocks=max_blocks)
 
     elif do_transcribe:
         from broadcastify.transcribe import transcribe_date
@@ -237,6 +238,8 @@ def _run_day(
               help="cuda / mps / cpu (auto-detected if omitted)")
 @click.option("--jobs", default=1, show_default=True,
               help="Parallel download threads (1 = sequential, safest for rate limits)")
+@click.option("--max-blocks", default=None, type=int,
+              help="Stop after downloading this many blocks total (useful for feed probing)")
 @click.option("--relogin", is_flag=True, default=False,
               help="Force Broadcastify re-authentication")
 @click.option("--overwrite", is_flag=True, default=False,
@@ -254,7 +257,7 @@ def _run_day(
 @click.option("--data-dir", default="data", show_default=True)
 def main(
     city, start_str, end_str, steps, whisper_model, device,
-    jobs, relogin, overwrite, preprocess, use_vad, min_confidence, chart, workers, data_dir,
+    jobs, max_blocks, relogin, overwrite, preprocess, use_vad, min_confidence, chart, workers, data_dir,
 ):
     start = date.fromisoformat(start_str)
     end = date.fromisoformat(end_str)
@@ -280,7 +283,7 @@ def main(
         _run_pipeline(
             city, start, end, data,
             do_download, do_transcribe, do_extract, do_analyze,
-            whisper_model, device, jobs, relogin, overwrite, preprocess, use_vad,
+            whisper_model, device, jobs, max_blocks, relogin, overwrite, preprocess, use_vad,
             min_confidence, chart, workers,
         )
 
@@ -290,7 +293,7 @@ def main(
 def _run_pipeline(
     city, start, end, data,
     do_download, do_transcribe, do_extract, do_analyze,
-    whisper_model, device, jobs, relogin, overwrite, preprocess, use_vad,
+    whisper_model, device, jobs, max_blocks, relogin, overwrite, preprocess, use_vad,
     min_confidence, chart, workers=1,
 ):
     # ── Rolling day-by-day loop (download → transcribe → extract per day) ─────
@@ -302,7 +305,7 @@ def _run_pipeline(
             incidents, call_log = _run_day(
                 dt, city,
                 do_download, do_transcribe, do_extract,
-                whisper_model, device, jobs, relogin, overwrite, preprocess, use_vad, data,
+                whisper_model, device, jobs, max_blocks, relogin, overwrite, preprocess, use_vad, data,
                 workers=workers,
             )
             all_incidents.extend(incidents)

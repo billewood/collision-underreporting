@@ -25,11 +25,11 @@ from broadcastify.auth import auth_headers, get_cookie
 
 _SENTINEL = None  # signals end of download stream
 
-ARCHIVE_LIST_URL = "https://www.broadcastify.com/archives/ajax.php"
-ARCHIVE_DOWNLOAD_URL = "https://www.broadcastify.com/archives/downloadv2"
+ARCHIVE_LIST_URL = "https://www.broadcastify.com/archives/api/archives.php"
+ARCHIVE_DOWNLOAD_URL = "https://www.broadcastify.com/archives/download"
 
 # Seconds to wait between individual block downloads (avoids 429s)
-INTER_REQUEST_DELAY = 1.5
+INTER_REQUEST_DELAY = 3.0
 # Retry settings for 429 / transient errors
 MAX_RETRIES = 5
 RETRY_BACKOFF_BASE = 10  # seconds — doubles each retry (10, 20, 40, 80, 160)
@@ -57,9 +57,14 @@ def _list_archive_ids(feed_id: int, dt: date, headers: dict) -> list[str]:
     )
     resp.raise_for_status()
     data = resp.json()
-    if not data.get("data"):
-        return []
-    return [str(row[0]) for row in data["data"]]
+    # New API returns {"archives": [{"id": "...", "start": "...", ...}, ...]}
+    archives = data.get("archives", [])
+    if archives:
+        return [str(a["id"]) for a in archives]
+    # Fallback: old API returned {"data": [[id, ...], ...]}
+    if data.get("data"):
+        return [str(row[0]) for row in data["data"]]
+    return []
 
 
 def _download_block(
@@ -71,7 +76,7 @@ def _download_block(
 ) -> Path | None:
     """Download a single 30-minute archive block with retry on 429. Returns output path."""
     url_date = dt.strftime("%Y%m%d")
-    url = f"{ARCHIVE_DOWNLOAD_URL}/{feed_id}/{url_date}/{archive_id}"
+    url = f"{ARCHIVE_DOWNLOAD_URL}/{archive_id}"
 
     filename = f"{url_date}-{archive_id}-{feed_id}.mp3"
     out_path = out_dir / filename
@@ -104,6 +109,7 @@ def download_iter(
     headers: dict,
     feed_id: int,
     data_dir: Path,
+    max_blocks: int | None = None,
 ) -> "queue.Queue[Path | None]":
     """
     Download all blocks for a single day in a background thread, yielding
@@ -130,6 +136,9 @@ def download_iter(
             if (date_dir / f"{dt.strftime('%Y%m%d')}-{aid}-{feed_id}.mp3").exists()
         ]
         todo = [aid for aid in archive_ids if aid not in already]
+        if max_blocks is not None:
+            todo = todo[:max(0, max_blocks - len(already))]
+
         click.echo(
             f"  {dt}: {len(archive_ids)} blocks "
             f"({len(already)} cached, {len(todo)} to download)"
@@ -144,10 +153,10 @@ def download_iter(
             try:
                 path = _download_block(feed_id, aid, dt, date_dir, headers)
                 if path:
-                    click.echo(f"    ✓ {path.name}")
+                    click.echo(f"    OK {path.name}")
                     q.put(path)
             except Exception as exc:
-                click.echo(f"    ✗ {aid}: {exc}", err=True)
+                click.echo(f"    FAIL {aid}: {exc}", err=True)
             time.sleep(INTER_REQUEST_DELAY)
 
         q.put(_SENTINEL)
@@ -161,12 +170,14 @@ def download_range(
     city: str,
     start: date,
     end: date,
-    jobs: int = 4,
+    jobs: int = 1,
     relogin: bool = False,
     data_dir: Path = Path("data"),
+    max_blocks: int | None = None,
 ) -> list[Path]:
     """
-    Download all archive blocks for a city between start and end (inclusive).
+    Download archive blocks for a city between start and end (inclusive).
+    max_blocks: if set, stop after downloading this many blocks total (useful for probing).
     Returns list of downloaded file paths.
     """
     cfg = _load_city_config(city)
@@ -177,6 +188,9 @@ def download_range(
     downloaded = []
     current = start
     while current <= end:
+        if max_blocks is not None and len(downloaded) >= max_blocks:
+            break
+
         date_dir = data_dir / "audio" / city / current.strftime("%Y%m%d")
         date_dir.mkdir(parents=True, exist_ok=True)
 
@@ -186,48 +200,40 @@ def download_range(
             current += timedelta(days=1)
             continue
 
-        already = sum(
-            1 for aid in archive_ids
+        already = [
+            aid for aid in archive_ids
             if (date_dir / f"{current.strftime('%Y%m%d')}-{aid}-{feed_id}.mp3").exists()
+        ]
+        todo = [aid for aid in archive_ids if aid not in already]
+
+        remaining = (max_blocks - len(downloaded)) if max_blocks is not None else None
+        if remaining is not None:
+            todo = todo[:remaining]
+
+        click.echo(
+            f"  {current}: {len(archive_ids)} blocks "
+            f"({len(already)} cached, downloading {len(todo)}"
+            + (f" of {len(archive_ids) - len(already)} remaining" if remaining is not None and remaining < len(archive_ids) - len(already) else "")
+            + ")"
         )
-        todo = [aid for aid in archive_ids
-                if not (date_dir / f"{current.strftime('%Y%m%d')}-{aid}-{feed_id}.mp3").exists()]
-        click.echo(f"  {current}: {len(archive_ids)} blocks ({already} cached, {len(todo)} to download)")
 
-        if jobs == 1:
-            # Sequential with per-request delay — safest for rate limits
-            for aid in todo:
-                try:
-                    path = _download_block(feed_id, aid, current, date_dir, headers)
-                    if path:
-                        downloaded.append(path)
-                        click.echo(f"    ✓ {path.name}")
-                except Exception as exc:
-                    click.echo(f"    ✗ {aid}: {exc}", err=True)
-                time.sleep(INTER_REQUEST_DELAY)
-        else:
-            with ThreadPoolExecutor(max_workers=jobs) as pool:
-                futures = {
-                    pool.submit(
-                        _download_block, feed_id, aid, current, date_dir, headers
-                    ): aid
-                    for aid in todo
-                }
-                for future in as_completed(futures):
-                    aid = futures[future]
-                    try:
-                        path = future.result()
-                        if path:
-                            downloaded.append(path)
-                            click.echo(f"    ✓ {path.name}")
-                    except Exception as exc:
-                        click.echo(f"    ✗ {aid}: {exc}", err=True)
-
-        # Add already-cached files to the returned list
-        for aid in archive_ids:
+        # Cached blocks count toward max_blocks
+        for aid in already:
             p = date_dir / f"{current.strftime('%Y%m%d')}-{aid}-{feed_id}.mp3"
-            if p.exists() and p not in downloaded:
+            if p not in downloaded:
                 downloaded.append(p)
+
+        for aid in todo:
+            if max_blocks is not None and len(downloaded) >= max_blocks:
+                break
+            try:
+                path = _download_block(feed_id, aid, current, date_dir, headers)
+                if path:
+                    downloaded.append(path)
+                    click.echo(f"    OK {path.name}")
+            except Exception as exc:
+                click.echo(f"    FAIL {aid}: {exc}", err=True)
+            time.sleep(INTER_REQUEST_DELAY)
 
         time.sleep(2)  # pause between days
         current += timedelta(days=1)
@@ -241,15 +247,15 @@ def download_range(
 @click.option("--end", "end_str", required=True, help="End date YYYY-MM-DD (inclusive)")
 @click.option("--jobs", default=1, show_default=True, help="Parallel download threads (1 = sequential, safest for rate limits)")
 @click.option("--relogin", is_flag=True, default=False, help="Force re-authentication")
-@click.option(
-    "--data-dir", default="data", show_default=True, help="Root data directory"
-)
-def main(city, start_str, end_str, jobs, relogin, data_dir):
+@click.option("--max-blocks", default=None, type=int, help="Stop after downloading this many blocks (useful for probing)")
+@click.option("--data-dir", default="data", show_default=True, help="Root data directory")
+def main(city, start_str, end_str, jobs, relogin, max_blocks, data_dir):
     """Download Broadcastify archive blocks for a city and date range."""
     start = date.fromisoformat(start_str)
     end = date.fromisoformat(end_str)
     click.echo(f"Downloading {city} | {start} → {end} | {jobs} threads")
-    paths = download_range(city, start, end, jobs=jobs, relogin=relogin, data_dir=Path(data_dir))
+    paths = download_range(city, start, end, jobs=jobs, relogin=relogin,
+                           data_dir=Path(data_dir), max_blocks=max_blocks)
     click.echo(f"\nDone. {len(paths)} blocks downloaded.")
 
 

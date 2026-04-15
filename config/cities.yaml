@@ -5,16 +5,23 @@
 #   call_log      — scrape/parse a public web-based call log
 #   cad_api       — pull structured data from a public CAD/dispatch API
 
+broadcastify:
+  daily_download_limit: 500   # archive files per 24 hours (doubled from 250, as of April 2026)
+
 el_cerrito:
   incident_source: broadcastify
-  broadcastify_feed_id: 33365
+  broadcastify_feed_id: 12911
+  broadcastify_feed_id_legacy: 33365
   switrs_jurisdiction: "El Cerrito"
   fips: "06013"          # Contra Costa County
-  also_covers: ["Albany", "Kensington"]
+  also_covers: ["Richmond", "Albany", "Kensington", "San Pablo", "unincorporated Contra Costa west"]
+  switrs_jurisdictions: ["El Cerrito", "Richmond", "Albany", "Kensington", "San Pablo"]
   notes: >
-    CCRFCC (Contra Costa Regional Fire Communications Center) feed.
+    Primary feed: 12911 (Contra Costa County Fire Protection District) — conventional
+    hardware (Barix), covers west/central/east county, 365-day archive.
+    Legacy feed 33365 (Richmond & El Cerrito Fire) switched to trunk-recorder in early
+    2026; its 30-min archive blocks are silent after that point.
     Fire/EMS only — El Cerrito PD encrypted Sept 2025 (countywide Contra Costa).
-    Same feed covers Albany and Kensington Fire/EMS.
 
 berkeley:
   incident_source: call_log
