@@ -145,6 +145,7 @@ def _run_day(
     preprocess: bool,
     use_vad: bool,
     data: Path,
+    workers: int = 1,
 ) -> tuple[list, list]:
     """
     Run whichever steps are active for a single day. Returns (incidents, call_log).
@@ -209,6 +210,7 @@ def _run_day(
             overwrite=overwrite,
             preprocess=preprocess,
             use_vad=use_vad,
+            workers=workers,
         )
 
     incidents, call_log = [], []
@@ -247,10 +249,12 @@ def _run_day(
               help="Minimum confidence score for incidents (analyze step)")
 @click.option("--chart", is_flag=True, default=False,
               help="Save comparison chart (analyze step)")
+@click.option("--workers", default=1, show_default=True,
+              help="Parallel transcription workers (CPU only; try 2 on a quad-core machine)")
 @click.option("--data-dir", default="data", show_default=True)
 def main(
     city, start_str, end_str, steps, whisper_model, device,
-    jobs, relogin, overwrite, preprocess, use_vad, min_confidence, chart, data_dir,
+    jobs, relogin, overwrite, preprocess, use_vad, min_confidence, chart, workers, data_dir,
 ):
     start = date.fromisoformat(start_str)
     end = date.fromisoformat(end_str)
@@ -277,7 +281,7 @@ def main(
             city, start, end, data,
             do_download, do_transcribe, do_extract, do_analyze,
             whisper_model, device, jobs, relogin, overwrite, preprocess, use_vad,
-            min_confidence, chart,
+            min_confidence, chart, workers,
         )
 
     click.echo("\nPipeline complete.")
@@ -287,7 +291,7 @@ def _run_pipeline(
     city, start, end, data,
     do_download, do_transcribe, do_extract, do_analyze,
     whisper_model, device, jobs, relogin, overwrite, preprocess, use_vad,
-    min_confidence, chart,
+    min_confidence, chart, workers=1,
 ):
     # ── Rolling day-by-day loop (download → transcribe → extract per day) ─────
     if do_download or do_transcribe or do_extract:
@@ -299,6 +303,7 @@ def _run_pipeline(
                 dt, city,
                 do_download, do_transcribe, do_extract,
                 whisper_model, device, jobs, relogin, overwrite, preprocess, use_vad, data,
+                workers=workers,
             )
             all_incidents.extend(incidents)
             all_call_log.extend(call_log)

@@ -20,8 +20,11 @@ Usage:
 """
 
 import json
+import os
 import re
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -226,13 +229,18 @@ def _parse_filename(filename: str) -> tuple[str | None, str | None]:
     return None, None
 
 
-def _get_model(model_size: str, device: str, compute_type: str):
-    key = (model_size, device, compute_type)
-    if key not in _model_cache:
-        from faster_whisper import WhisperModel
-        _model_cache[key] = WhisperModel(
-            model_size, device=device, compute_type=compute_type
-        )
+_model_lock = threading.Lock()
+
+
+def _get_model(model_size: str, device: str, compute_type: str, cpu_threads: int = 0):
+    key = (model_size, device, compute_type, cpu_threads)
+    with _model_lock:
+        if key not in _model_cache:
+            from faster_whisper import WhisperModel
+            _model_cache[key] = WhisperModel(
+                model_size, device=device, compute_type=compute_type,
+                cpu_threads=cpu_threads,
+            )
     return _model_cache[key]
 
 
@@ -265,6 +273,7 @@ def transcribe_file(
     compute_type: str | None = None,
     preprocess: bool = True,
     use_vad: bool = True,
+    cpu_threads: int = 0,
 ) -> dict:
     """
     Transcribe a single MP3 block. Returns transcript dict.
@@ -272,7 +281,7 @@ def transcribe_file(
     if device is None or compute_type is None:
         device, compute_type = _detect_device()
 
-    model = _get_model(model_size, device, compute_type)
+    model = _get_model(model_size, device, compute_type, cpu_threads)
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         if preprocess:
@@ -338,10 +347,15 @@ def transcribe_date(
     overwrite: bool = False,
     preprocess: bool = True,
     use_vad: bool = True,
+    workers: int = 1,
 ) -> list[Path]:
     """
     Transcribe all downloaded blocks for a city on a given date.
     Returns list of output transcript paths.
+
+    workers > 1: run that many files concurrently using threads. CTranslate2
+    is thread-safe; each worker gets cpu_threads = max(1, total_cores // workers)
+    so total CPU usage stays within the available core count.
     """
     audio_dir = data_dir / "audio" / city / dt.strftime("%Y%m%d")
     if not audio_dir.exists():
@@ -359,35 +373,57 @@ def transcribe_date(
     if device is None or compute_type is None:
         device, compute_type = _detect_device()
 
+    cpu_threads = max(1, os.cpu_count() // workers) if device == "cpu" else 0
+
     flags = []
     if not preprocess:
         flags.append("no-preprocess")
     if not use_vad:
         flags.append("no-vad")
+    if workers > 1:
+        flags.append(f"{workers} workers × {cpu_threads} threads")
     click.echo(
         f"Transcribing {len(mp3_files)} blocks | {city} {dt} | "
         f"{model_size} on {device}/{compute_type}"
         + (f" | {', '.join(flags)}" if flags else "")
     )
 
-    output_paths = []
-    for i, mp3 in enumerate(mp3_files, 1):
-        out_path = transcript_dir / (mp3.stem + ".json")
-        if out_path.exists() and not overwrite:
-            output_paths.append(out_path)
-            continue
+    # Pre-warm the model before entering the thread pool (avoid redundant loads)
+    _get_model(model_size, device, compute_type, cpu_threads)
 
-        click.echo(f"  [{i}/{len(mp3_files)}] {mp3.name}", nl=False)
-        result = transcribe_file(mp3, city, model_size, device, compute_type, preprocess, use_vad)
-        filtered = result["segments_raw_count"] - len(result["segments"])
-        out_path.write_text(json.dumps(result, indent=2, ensure_ascii=False))
-        click.echo(
-            f" → {len(result['segments'])} segments"
-            + (f" ({filtered} hallucinations removed)" if filtered else "")
+    pending = [
+        mp3 for mp3 in mp3_files
+        if overwrite or not (transcript_dir / (mp3.stem + ".json")).exists()
+    ]
+    already_done = [
+        transcript_dir / (mp3.stem + ".json")
+        for mp3 in mp3_files
+        if not overwrite and (transcript_dir / (mp3.stem + ".json")).exists()
+    ]
+
+    print_lock = threading.Lock()
+    completed: list[Path] = list(already_done)
+
+    def _transcribe_one(mp3: Path) -> Path:
+        result = transcribe_file(
+            mp3, city, model_size, device, compute_type, preprocess, use_vad, cpu_threads
         )
-        output_paths.append(out_path)
+        out_path = transcript_dir / (mp3.stem + ".json")
+        out_path.write_text(json.dumps(result, indent=2, ensure_ascii=False))
+        filtered = result["segments_raw_count"] - len(result["segments"])
+        with print_lock:
+            click.echo(
+                f"  {mp3.name} → {len(result['segments'])} segments"
+                + (f" ({filtered} hallucinations removed)" if filtered else "")
+            )
+        return out_path
 
-    return output_paths
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_transcribe_one, mp3): mp3 for mp3 in pending}
+        for future in as_completed(futures):
+            completed.append(future.result())
+
+    return completed
 
 
 @click.command()
