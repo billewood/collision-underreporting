@@ -31,8 +31,12 @@ ARCHIVE_DOWNLOAD_URL = "https://www.broadcastify.com/archives/download"
 # Seconds to wait between individual block downloads (avoids 429s)
 INTER_REQUEST_DELAY = 3.0
 # Retry settings for 429 / transient errors
-MAX_RETRIES = 5
-RETRY_BACKOFF_BASE = 10  # seconds — doubles each retry (10, 20, 40, 80, 160)
+MAX_RETRIES = 3        # reduced from 5 — persistent 429 = quota, not transient limit
+RETRY_BACKOFF_BASE = 5  # seconds — doubles each retry (5, 10, 20)
+
+
+class QuotaExhaustedException(Exception):
+    """Raised when Broadcastify's daily download quota has been reached."""
 
 
 def _load_city_config(city: str) -> dict:
@@ -100,7 +104,9 @@ def _download_block(
         out_path.write_bytes(resp.content)
         return out_path
 
-    raise RuntimeError(f"Failed to download {archive_id} after {MAX_RETRIES} retries (persistent 429)")
+    raise QuotaExhaustedException(
+        f"Daily quota exhausted — got 429 on every attempt for {archive_id}. Stopping."
+    )
 
 
 def download_iter(
@@ -155,6 +161,8 @@ def download_iter(
                 if path:
                     click.echo(f"    OK {path.name}")
                     q.put(path)
+            except QuotaExhaustedException:
+                raise  # propagate immediately — no point retrying other blocks
             except Exception as exc:
                 click.echo(f"    FAIL {aid}: {exc}", err=True)
             time.sleep(INTER_REQUEST_DELAY)
@@ -231,6 +239,8 @@ def download_range(
                 if path:
                     downloaded.append(path)
                     click.echo(f"    OK {path.name}")
+            except QuotaExhaustedException:
+                raise  # propagate immediately — no point retrying other blocks
             except Exception as exc:
                 click.echo(f"    FAIL {aid}: {exc}", err=True)
             time.sleep(INTER_REQUEST_DELAY)

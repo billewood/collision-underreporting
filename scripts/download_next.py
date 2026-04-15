@@ -100,7 +100,11 @@ def _run(city, earliest, quota, data_dir, dry_run):
         files_this_run += new_files
 
         if result.returncode != 0:
-            click.echo(f"Download failed for {target_date} (exit {result.returncode}) — stopping.")
+            if new_files == 0:
+                # No files downloaded and non-zero exit = quota hit or hard failure
+                click.echo(f"Quota exhausted or hard failure on {target_date} (exit {result.returncode}) — stopping.")
+            else:
+                click.echo(f"Partial download on {target_date} ({new_files} files, exit {result.returncode}) — stopping.")
             break
 
         click.echo(f"  {new_files} files downloaded | running total: {files_this_run}/{quota}")
