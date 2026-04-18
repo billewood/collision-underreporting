@@ -50,46 +50,57 @@ def _run_silent(cmd: list[str]) -> bool:
 def _no_sleep():
     """
     Prevent the OS from sleeping during a long pipeline run.
-    Restores original settings on exit (even if the pipeline errors or is interrupted).
+    Releases the inhibitor on exit (even if the pipeline errors or is interrupted).
 
-    Supports:
-      - Linux systemd: masks sleep/suspend/hibernate targets
-      - GNOME: disables AC idle sleep + screen blank via gsettings
+    Uses systemd-inhibit (system-level, no DBUS session required) if available,
+    otherwise falls back to gsettings for GNOME desktops.
     """
-    sleep_targets = [
-        "sleep.target", "suspend.target", "hibernate.target", "hybrid-sleep.target"
-    ]
+    inhibit_proc = None
 
-    masked = _run_silent(
-        ["systemctl", "--user", "mask"] + sleep_targets
-    )
-    ac_sleep_disabled = _run_silent([
-        "gsettings", "set",
-        "org.gnome.settings-daemon.plugins.power", "sleep-inactive-ac-type", "nothing"
-    ])
-    idle_disabled = _run_silent([
-        "gsettings", "set", "org.gnome.desktop.session", "idle-delay", "0"
-    ])
+    if shutil.which("systemd-inhibit"):
+        try:
+            inhibit_proc = subprocess.Popen(
+                [
+                    "systemd-inhibit",
+                    "--what=sleep:idle",
+                    "--who=collision-pipeline",
+                    "--why=running pipeline",
+                    "--mode=block",
+                    "sleep", "infinity",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            click.echo("Sleep inhibited for pipeline run.")
+        except Exception:
+            inhibit_proc = None
 
-    if masked or ac_sleep_disabled:
-        click.echo("Sleep inhibited for pipeline run.")
+    if inhibit_proc is None:
+        # Fallback: gsettings (requires active DBUS session)
+        _run_silent([
+            "gsettings", "set",
+            "org.gnome.settings-daemon.plugins.power", "sleep-inactive-ac-type", "nothing"
+        ])
+        _run_silent([
+            "gsettings", "set", "org.gnome.desktop.session", "idle-delay", "0"
+        ])
+        click.echo("Sleep inhibited for pipeline run (gsettings).")
 
     try:
         yield
     finally:
-        if masked:
-            _run_silent(["systemctl", "--user", "unmask"] + sleep_targets)
-        if ac_sleep_disabled:
+        if inhibit_proc is not None:
+            inhibit_proc.terminate()
+            inhibit_proc.wait()
+        else:
             _run_silent([
                 "gsettings", "set",
                 "org.gnome.settings-daemon.plugins.power", "sleep-inactive-ac-type", "suspend"
             ])
-        if idle_disabled:
             _run_silent([
                 "gsettings", "set", "org.gnome.desktop.session", "idle-delay", "300"
             ])
-        if masked or ac_sleep_disabled:
-            click.echo("Sleep settings restored.")
+        click.echo("Sleep settings restored.")
 
 
 def _hardware_summary() -> str:
