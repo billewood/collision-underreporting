@@ -31,7 +31,7 @@ BROADCASTIFY_DAILY_QUOTA = 499
               help="Don't search for missing dates before this date")
 @click.option("--quota", default=BROADCASTIFY_DAILY_QUOTA, show_default=True,
               help="Max files to download this run")
-@click.option("--data-dir", default="data", show_default=True)
+@click.option("--data-dir", default="/media/bill/FivetbEphys/collision data", show_default=True)
 @click.option("--dry-run", is_flag=True, help="Print what would be downloaded without downloading")
 def main(city, earliest, quota, data_dir, dry_run):
     """Download missing historical dates up to the daily Broadcastify quota."""

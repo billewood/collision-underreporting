@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 RESEND_API_URL = "https://api.resend.com/emails"
-LOG_PATH = Path("data/pipeline.log")
+LOG_PATH = Path("/media/bill/FivetbEphys/collision data/pipeline.log")
 
 
 def _send_email(subject: str, html: str):
